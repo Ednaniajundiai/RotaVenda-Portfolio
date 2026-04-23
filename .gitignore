@@ -1,0 +1,68 @@
+# ── Ambiente / Segredos ──────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env.local
+!.env.example
+!.env.local.example
+!backend/.env.example
+!frontend/.env.local.example
+
+# ── Documentacao interna / Planos (nao subir para o GitHub) ──────────────────
+# A pasta docs/ (publica) e versionada; apenas planos internos e anotacoes sao ignorados.
+PLANO*.md
+AGENTS.md
+*.plan.md
+.cursor/
+
+# ── Arquivos temporarios do Office ───────────────────────────────────────────
+~$*
+*.tmp
+
+# ── Arquivos de dados locais ─────────────────────────────────────────────────
+*.xlsx
+*.csv
+*.txt
+!requirements*.txt
+!LICENSE.txt
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Node / Next.js ───────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+.vercel
+frontend/tsconfig.tsbuildinfo
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+postgres_data/
+
+# ── IDE / Tooling local ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+.claude/settings.local.json
+*.swp
+*.swo
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
