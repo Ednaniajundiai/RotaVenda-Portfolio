@@ -1,291 +1,281 @@
 # Arquitetura — RotaVenda
 
-Este documento descreve a arquitetura de alto nível do sistema, a modelagem de
-dados e os fluxos mais importantes do ponto de vista de negócio.
+Documento técnico do sistema em produção na D'Lucri: visão de componentes,
+modelagem de dados, os fluxos que concentram a complexidade do domínio e os
+trade-offs assumidos.
 
-Para decisões de design documentadas em detalhe, consulte [`docs/adr/`](docs/adr/).
+As decisões formais estão registradas em [`docs/adr/`](docs/adr/).
 
 ---
 
-## Visão de componentes
+## 1 · Visão de componentes
 
 ```mermaid
 flowchart TB
-    subgraph Client["Cliente"]
-        Browser[Browser / Mobile PWA]
+    subgraph Campo["Uso em campo"]
+        Tablet["Tablet do vendedor<br/>rede móvel instável"]
+        Balcao["Balcão da loja"]
     end
 
-    subgraph Frontend["Next.js 15 (App Router)"]
-        Pages[Páginas segmentadas<br/>app/(app) · app/(auth)]
-        Hooks[Hooks de dados<br/>TanStack Query]
-        Axios[lib/api.ts<br/>Axios + interceptors]
+    subgraph Front["Next.js 15 · App Router"]
+        Pages["Páginas<br/>segmento autenticado e público"]
+        Query["TanStack Query v5<br/>cache e invalidação"]
+        Http["Camada HTTP<br/>Axios + interceptors"]
+        Mw["Middleware<br/>gating de rota por papel"]
     end
 
-    subgraph Backend["FastAPI"]
-        Routers[Routers /api/v1<br/>autenticação + validação]
-        Services[Services<br/>regras de negócio]
-        Models[Models SQLAlchemy]
-        Alembic[Alembic<br/>migrations reversíveis]
+    subgraph Api["FastAPI · /api/v1"]
+        Routers["Routers finos<br/>autenticação e contrato"]
+        Services["Services<br/>toda a regra de negócio"]
+        Models["Models SQLAlchemy"]
     end
 
-    DB[(PostgreSQL 16)]
+    Alembic["Alembic<br/>migrations reversíveis"]
+    DB[("PostgreSQL 16")]
 
-    Browser -->|HTTPS| Pages
-    Pages --> Hooks
-    Hooks --> Axios
-    Axios -->|JWT Bearer<br/>+ refresh cookie| Routers
-    Routers --> Services
-    Services --> Models
-    Models --> DB
+    Tablet --> Pages
+    Balcao --> Pages
+    Pages --> Query --> Http
+    Pages -.-> Mw
+    Http -->|"Bearer + cookie httpOnly"| Routers
+    Routers --> Services --> Models --> DB
     Alembic --> DB
 ```
 
-**Princípio:** os routers são finos — apenas extraem o request, chamam um
-service e retornam o `response_model`. Toda decisão de negócio
-(validação de invariantes, cálculo de totais, matching FIFO) mora em
-[`app/services/`](backend/app/services/). Ver [ADR 0003](docs/adr/0003-router-fino-service-gordo.md).
+**Princípio estrutural.** Os routers são finos: extraem o request, chamam um
+service e devolvem o modelo de resposta. Toda decisão de negócio — validação de
+invariantes, cálculo de totais, alocação FIFO, regras de bloqueio — mora na
+camada de serviço. Nenhum router contém condicional de domínio.
+
+Isso não é preferência estética. O sistema tem três superfícies que precisam
+aplicar as mesmas regras (API HTTP, scripts de migração do acervo e seeds
+operacionais); regra em router só funcionaria na primeira.
 
 ---
 
-## Diagrama de entidades
+## 2 · Modelo de dados
 
 ```mermaid
 erDiagram
-    USER ||--o{ ROUTE : "vende em"
-    USER ||--o{ SALE : "registra"
-    USER ||--o{ PAYMENT : "recebe"
-    STREET ||--o{ CLIENT_STREET : "tem"
-    CLIENT ||--o{ CLIENT_STREET : "mora em"
-    ROUTE ||--o{ ROUTE_STREET : "visita"
-    STREET ||--o{ ROUTE_STREET : "aparece em"
-    ROUTE_TEMPLATE ||--o{ ROUTE_TEMPLATE_STREET : "define"
-    STREET ||--o{ ROUTE_TEMPLATE_STREET : "listada em"
-    CLIENT ||--o{ SALE : "compra"
-    ROUTE_STREET ||--o{ SALE : "contém"
-    SALE ||--o{ SALE_ITEM : "tem itens"
-    PRODUCT ||--o{ SALE_ITEM : "vendido como"
-    SALE ||--o{ SALE_INSTALLMENT : "dividido em"
-    SALE_INSTALLMENT ||--o{ INSTALLMENT_PAYMENT : "amortizada por"
-    PAYMENT ||--o{ INSTALLMENT_PAYMENT : "aplica em"
-    CLIENT ||--o{ PAYMENT : "paga"
+    USER ||--o{ ROUTE : opera
+    USER ||--o{ SALE : registra
+    USER ||--o{ PAYMENT : recebe
 
-    USER {
-        uuid id PK
-        string email UK
-        string hashed_password
-        enum role "GERENTE | VENDEDOR"
-        bool is_active
-    }
-    CLIENT {
-        uuid id PK
-        string name
-        string phone
-        numeric opening_balance
-        bool is_active
-    }
-    SALE {
-        uuid id PK
-        uuid client_id FK
-        uuid seller_id FK
-        uuid route_street_id FK "NULL em venda LOJA"
-        date sale_date
-        numeric amount "SUM(items.subtotal) - discount"
-        numeric discount
-        enum sale_type "ROTA | LOJA"
-        enum payment_mode "A_VISTA | FIADO"
-        bool is_active
-    }
-    SALE_INSTALLMENT {
-        uuid id PK
-        uuid sale_id FK
-        int number
-        date due_date
-        numeric amount
-        numeric paid_amount
-        datetime paid_at "nulo até quitar"
-    }
-    PAYMENT {
-        uuid id PK
-        uuid client_id FK
-        uuid seller_id FK
-        date payment_date
-        numeric amount
-        bool is_active
-    }
-    INSTALLMENT_PAYMENT {
-        uuid id PK
-        uuid installment_id FK
-        uuid payment_id FK
-        numeric amount
-    }
+    CLIENT ||--o{ CLIENT_STREET : "reside em"
+    STREET ||--o{ CLIENT_STREET : agrupa
+
+    ROUTE ||--o{ ROUTE_STREET : "tem parada"
+    STREET ||--o{ ROUTE_STREET : "é visitada em"
+    ROUTE_STREET ||--o{ ROUTE_STOP_CLIENT : "atende"
+    CLIENT ||--o{ ROUTE_STOP_CLIENT : "é atendido em"
+
+    ROUTE_TEMPLATE ||--o{ ROUTE_TEMPLATE_STREET : define
+    ROUTE_TEMPLATE_STREET ||--o{ ROUTE_TEMPLATE_STOP_CLIENT : aloca
+
+    CLIENT ||--o{ SALE : compra
+    SALE ||--o{ SALE_ITEM : contém
+    PRODUCT ||--o{ SALE_ITEM : "referenciado por"
+    SALE ||--o{ SALE_INSTALLMENT : parcela
+
+    CLIENT ||--o{ PAYMENT : paga
+    PAYMENT ||--o{ INSTALLMENT_PAYMENT : aloca
+    SALE_INSTALLMENT ||--o{ INSTALLMENT_PAYMENT : "recebe baixa"
+
+    CLIENT ||--o{ CREDIT_APPLICATION : "tem crédito"
+    SALE ||--o{ CREDIT_APPLICATION : "abatido por"
 ```
 
-### Notas sobre a modelagem
+**Notas de modelagem**
 
-- **UUID como PK** em todas as tabelas — evita conflito em importação e
-  permite gerar IDs no cliente sem *round trip*.
-- **`CLIENT_STREET`** é uma tabela associativa com `house_number`,
-  `reference` e `display_order` — suporta clientes com mais de um endereço.
-- **`ROUTE_STREET`** representa a *instância* de uma rua numa rota do dia, com
-  status próprio (`PENDING` → `IN_PROGRESS` → `COMPLETED`).
-- **`ROUTE_TEMPLATE`** é *blueprint* reutilizável — o vendedor duplica no dia
-  para criar uma rota. Ver [ADR 0005](docs/adr/0005-templates-imutaveis-de-rota.md).
-- **Cliente não tem coluna `saldo`.** O saldo é derivado em tempo real:
-  `SUM(sales FIADO ativas) − SUM(payments ativos) + opening_balance`.
-  Ver [ADR 0001](docs/adr/0001-saldo-calculado.md).
+- **Chaves.** UUID em todas as entidades. Identificador sequencial vazaria
+  volume de negócio e complicaria a consolidação de lotes da migração.
+- **`sale_items` é snapshot.** Preço e descrição são copiados no momento da
+  venda. Alterar o catálogo hoje não pode reescrever o histórico de crédito de
+  ninguém.
+- **`installment_payments` é a tabela central do domínio.** Ela materializa
+  *quanto de cada pagamento foi para cada parcela* — é o que torna a baixa FIFO
+  auditável e o estorno reversível.
+- **Exclusão lógica** via sinalizador de atividade em vendas, pagamentos e
+  clientes. Registro financeiro não é apagado fisicamente.
+- **Bloqueio ≠ exclusão.** Cliente bloqueado continua visível e operável à
+  vista; apenas o crédito novo é negado. São dois conceitos distintos, com
+  colunas distintas — confundi-los foi um erro corrigido cedo.
 
 ---
 
-## Fluxo 1 — Venda fiado com parcelas
+## 3 · O fluxo central: venda a prazo e baixa FIFO
+
+Este é o núcleo do sistema. Tudo o mais orbita em torno dele.
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant U as Vendedor
-    participant F as Frontend<br/>(wizard de venda)
-    participant A as POST /sales
-    participant S as sale_service
-    participant I as installment_service
-    participant DB as Postgres
+    participant V as Vendedor
+    participant API as FastAPI
+    participant S as sale/payment service
+    participant DB as PostgreSQL
 
-    U->>F: Seleciona cliente, itens, desconto, modo=FIADO, parcelas
-    F->>A: JSON {items, discount, payment_mode, installments}
-    A->>S: create_sale(payload)
-    S->>S: amount = SUM(items.subtotal) - discount
-    S->>DB: INSERT sale + sale_items
-    S->>I: create_installments_for_sale(sale, inputs)
-    I->>I: valida SUM(installments) == sale.amount
-    I->>DB: INSERT sale_installments
-    S-->>A: SaleResponse com installments
-    A-->>F: 201 Created
+    Note over V,DB: Venda a prazo
+    V->>API: POST /sales (itens, parcelas, chave de idempotência)
+    API->>S: create_sale
+    S->>S: valida cliente não bloqueado
+    S->>S: total = Σ(qtd × preço) − desconto
+    S->>S: valida Σ(parcelas) == total
+    S->>DB: grava venda + itens + parcelas
+    API-->>V: venda criada
+
+    Note over V,DB: Recebimento, dias depois
+    V->>API: POST /payments (valor, chave de idempotência)
+    API->>S: create_payment
+    S->>DB: parcelas em aberto, ordenadas por vencimento
+    loop enquanto sobrar valor
+        S->>S: aloca min(saldo restante, saldo da parcela)
+        S->>DB: grava alocação e atualiza a parcela
+    end
+    alt sobra após quitar tudo
+        S->>S: excedente permanece como crédito do cliente
+    end
+    API-->>V: pagamento registrado
 ```
 
-**Invariantes garantidas pelo backend:**
+**Por que o total é recalculado no servidor.** O cliente HTTP envia itens e
+quantidades, nunca o valor. Se enviasse, uma requisição adulterada — ou
+simplesmente um bug de arredondamento no frontend — inscreveria uma dívida
+incorreta no nome de uma pessoa real.
 
-- O campo `amount` recebido do cliente é ignorado em vendas com itens — o
-  total é sempre recalculado a partir de `SUM(sale_items.subtotal) - discount`.
-- A soma dos `installments.amount` precisa bater com `sale.amount` (tolerância
-  de 1 centavo para erros de arredondamento decimal).
-- `route_street_id` só é aceito para vendas de tipo `ROTA`.
+**Por que o excedente vira crédito e não erro.** Na operação real o cliente
+frequentemente arredonda para cima. Rejeitar o pagamento obrigaria o vendedor a
+recusar dinheiro na porta da casa. O excedente é retido como crédito e aplicado
+explicitamente em compra futura, com registro próprio.
+
+### Cálculo de saldo
+
+```
+saldo_líquido = débito − crédito
+
+débito  = Σ (parcela.valor − parcela.valor_pago)   sobre vendas a prazo ativas
+crédito = Σ pagamentos ativos − Σ alocações em parcelas
+```
+
+Saldo negativo significa crédito a favor do cliente. A fórmula tem **uma única
+implementação canônica**, com variante em lote para listagens; os demais
+serviços delegam a ela. Essa unificação foi uma dívida técnica identificada e
+paga — a regra havia se duplicado em quatro pontos, e a divergência entre eles
+era questão de tempo.
 
 ---
 
-## Fluxo 2 — Pagamento com matching FIFO
+## 4 · Rota como sequência de paradas
 
-Quando o vendedor registra um pagamento **sem** indicar em quais parcelas
-aplicar, o backend distribui o valor automaticamente na ordem
-`due_date ASC, number ASC` — quita a mais antiga primeiro, consome o saldo,
-e vai para a próxima. Se ainda sobrar valor depois que todas as parcelas
-estão quitadas, amortiza o `opening_balance` do cliente. Se ainda sobrar,
-retorna HTTP 400 (pagamento excede dívida).
+A primeira modelagem tratava rota como *lista de ruas*. A operação real
+desmentiu o modelo: o vendedor percorre a mesma via na ida e na volta,
+atendendo clientes diferentes em cada passagem — e o modelo original tinha uma
+restrição de unicidade que tornava isso impossível de representar.
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant U as Vendedor
-    participant A as POST /payments
-    participant PS as payment_service
-    participant IS as installment_service
-    participant DB as Postgres
-
-    U->>A: {client_id, amount=R$50, sem applications}
-    A->>PS: create_payment(payload)
-    PS->>DB: INSERT payment
-    PS->>IS: apply_payment_to_installments(...)
-    IS->>DB: SELECT installments ORDER BY due_date, number<br/>WHERE paid_amount < amount<br/>FOR UPDATE
-    loop Para cada parcela em aberto
-        alt Valor restante >= saldo da parcela
-            IS->>DB: INSERT installment_payment (amount=saldo)
-            IS->>DB: UPDATE parcela SET paid_amount=amount, paid_at=now
-        else Valor restante < saldo da parcela
-            IS->>DB: INSERT installment_payment (amount=restante)
-            IS->>DB: UPDATE parcela SET paid_amount += restante
-            Note over IS: paid_at permanece NULL
-        end
-    end
-    alt Sobrou valor após todas as parcelas
-        IS->>DB: UPDATE client SET opening_balance -= resto
-    end
-    alt Ainda sobra após opening_balance
-        IS-->>A: HTTP 400 "Pagamento excede saldo devedor"
-    end
+flowchart LR
+    T["Template de rota<br/>blueprint reutilizável"] -->|clonagem| R["Rota do dia"]
+    R --> P1["Parada 1<br/>Rua A · ida"]
+    R --> P2["Parada 2<br/>Rua B"]
+    R --> P3["Parada 3<br/>Rua A · volta"]
+    P1 --> C1["clientes alocados"]
+    P2 --> C2["clientes alocados"]
+    P3 --> C3["clientes alocados"]
 ```
 
-**Por que `FOR UPDATE`:** dois pagamentos simultâneos do mesmo cliente
-poderiam ler o mesmo `paid_amount` e ambos considerar a parcela em aberto,
-resultando em dupla amortização. O lock de linha na consulta evita isso.
+**O que mudou.** A restrição de unicidade foi removida, cada parada ganhou
+rótulo próprio e a alocação de clientes passou a pertencer à parada, não à rua.
+O template carrega a divisão de clientes e é **clonado** — não referenciado — a
+cada nova rota, de modo que reorganizar o template não reescreve o histórico de
+rotas já executadas.
 
-Cobertura de testes deste fluxo em
-[`test_payment_service.py::TestFifoMatching`](backend/tests/test_payment_service.py).
+**Execução guiada.** A interface apresenta uma parada por vez, com avanço
+automático ao concluir. O vendedor não escolhe em qual tela está: o sistema o
+conduz. Decisão de produto direta — reduzir carga cognitiva de quem opera em pé,
+na rua, com uma mão.
 
 ---
 
-## Fluxo 3 — Edição de venda com imutabilidade condicional
+## 5 · Migração do acervo em papel
 
-Editar uma venda após quitação parcial é perigoso: o valor histórico das
-parcelas já foi registrado em `installment_payments` e o saldo do cliente
-depende dele. A regra adotada:
+O maior risco do projeto não era técnico, era de confiança: se um único cliente
+aparecesse com dívida errada, o sistema perderia credibilidade e a operação
+voltaria ao caderno.
 
 ```mermaid
-flowchart TD
-    Start[PUT /sales/:id] --> Check{Alguma parcela<br/>com paid_amount > 0?}
-    Check -->|Não| Allow[Permite alterar<br/>items, discount, installments, payment_mode]
-    Check -->|Sim| Block{Campos solicitados?}
-    Block -->|items ou discount| Reject[HTTP 400<br/>Bloqueio de integridade]
-    Block -->|description apenas| Allow
-    Allow --> Recalc[Se items/discount mudaram:<br/>amount = SUM(subtotal) - discount]
-    Recalc --> Save[UPDATE sale]
+flowchart LR
+    F["Foto da folha"] --> T["Transcrição<br/>estruturada"]
+    T --> V["Validação<br/>contra saldo declarado"]
+    V --> L["Lote em revisão<br/>oculto ao vendedor"]
+    L --> A{"Gestor<br/>aprova?"}
+    A -->|sim| P["Promovido<br/>a produção"]
+    A -->|não| T
 ```
 
-Essa regra é testada em
-[`test_sale_service.py::TestUpdateSale`](backend/tests/test_sale_service.py).
+**Decisões que sustentaram a confiança**
+
+- Lote nasce **oculto**. Só o gestor enxerga até liberar — o vendedor nunca vê
+  dado não conferido.
+- Divergência entre a soma das linhas e o saldo declarado no caderno **bloqueia**
+  a promoção do lote.
+- Rasura, nome apagado e valor ambíguo têm regra de resolução documentada e
+  aplicada de forma uniforme; não são decisão de quem digita.
+- O processo é **idempotente**: reexecutar um lote não duplica registro.
+
+Resultado: 160 folhas, 680 registros e cerca de R$ 31 mil em crédito
+reconciliado sem contestação em produção.
 
 ---
 
-## Autenticação e autorização
+## 6 · Resiliência e segurança
 
-- **Access token** — JWT curto (30 min por padrão), guardado em `localStorage`.
-  Enviado em `Authorization: Bearer <token>`.
-- **Refresh token** — JWT de 7 dias, guardado em cookie `httpOnly` para que
-  JavaScript do browser não consiga ler (defesa contra XSS). Ver
-  [ADR 0002](docs/adr/0002-refresh-token-cookie.md).
-- **`get_current_user`** em [`api/deps.py`](backend/app/api/deps.py) é a única
-  porta de autenticação; todos os routers protegidos dependem dela.
-- **`require_gerente`** é a porta extra para endpoints restritos (criação de
-  usuário, relatórios agregados, exclusão de pagamento).
-
----
-
-## Estratégia de testes
-
-- **Integração contra Postgres real** — usa o mesmo banco do `.env`.
-- **Isolamento por savepoint** — cada teste abre uma transação externa e uma
-  interna (via `join_transaction_mode="create_savepoint"`); `commit()` feito
-  dentro do service libera o savepoint, e a transação externa é revertida no
-  teardown. Zero poluição entre testes, zero teardown manual.
-- **Fixtures** em `conftest.py` cobrem `gerente`, `vendedor` e headers com JWT.
-- **CI** roda `black --check`, `isort --check-only`, `alembic upgrade head` e
-  `pytest --cov`. Ver [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+| Preocupação | Tratamento |
+| --- | --- |
+| Rede móvel instável | Chave de idempotência em criação de venda e pagamento; a repetição retorna o recurso original |
+| Roubo de token via XSS | Renovação em cookie `httpOnly`; acesso de vida curta; autorização sempre reverificada no servidor |
+| Escalada de privilégio | Papel resolvido no servidor a cada requisição; o cookie de papel serve apenas para decidir renderização |
+| Força bruta em login | Limite de taxa aplicado seletivamente no endpoint exposto |
+| Corrupção de histórico | Exclusão lógica, estorno reversível e trilha de auditoria imutável |
+| Erro de esquema em produção | Todas as migrations implementam o caminho de volta |
+| Perda de dados | Rotina de backup e restauração documentada e testada |
 
 ---
 
-## Operação
+## 7 · Estratégia de testes
 
-### Migrations
+Trinta e uma suítes de integração cobrem o que dá prejuízo se quebrar:
+consistência de saldo, alocação e estorno, idempotência, autorização por papel,
+normalização de telefone, tratamento de datas e geração de exportações.
 
-Toda mudança de schema passa por Alembic, com `upgrade()` e `downgrade()`
-implementados. A migration mais recente é aplicada automaticamente no startup
-do container backend (`alembic upgrade head` no `command` do `docker-compose.yml`).
+**Isolamento por savepoint.** Cada teste executa dentro de uma transação
+revertida ao final. Não há banco dedicado, seed prévio nem rotina de limpeza —
+e não se paga o custo de recriar o esquema a cada execução.
 
-### Seed sintético
+**O que é deliberadamente coberto por teste, não por tipo.** Regras temporais —
+"não editar venda com parcela paga", "não vender a prazo para cliente
+bloqueado" — dependem de estado em tempo de execução. Nenhum sistema de tipos as
+captura; testes capturam.
 
-[`backend/app/db/seed_demo.py`](backend/app/db/seed_demo.py) popula o banco
-com dados 100% fictícios (`Faker` pt_BR + semente fixa `42`), cobrindo ruas,
-produtos, usuários, clientes, template de rota, rota ativa, vendas mistas e
-pagamentos FIFO. Idempotente — seguro rodar múltiplas vezes.
+---
 
-### Soft-delete
+## 8 · Dívidas conhecidas
 
-Entidades principais (`sales`, `payments`, `clients`, `users`, `products`)
-nunca são apagadas fisicamente — `is_active` é flipado para `False`. Ver
-[ADR 0004](docs/adr/0004-soft-delete-via-is-active.md).
+Registrar o que ainda não está resolvido é parte da honestidade técnica do
+projeto.
+
+| Dívida | Situação |
+| --- | --- |
+| Sobrebusca no cliente HTTP penaliza tablets de menor capacidade | Diagnosticado: o gargalo é o número de requisições da interface, não o servidor. Consolidação de endpoints em andamento |
+| Ausência de modo offline real | O vendedor depende de conectividade; especificação escrita, implementação não priorizada |
+| Cobertura de teste do frontend | Concentrada no backend; a camada de interface é validada manualmente |
+| Estoque não movimenta na venda | Decisão consciente do negócio no momento — o ajuste é manual pelo gestor |
+
+---
+
+<div align="center">
+<sub>
+
+Documento mantido junto ao sistema. Última revisão alinhada ao estado de
+produção de julho de 2026.
+
+</sub>
+</div>

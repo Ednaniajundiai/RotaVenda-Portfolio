@@ -1,63 +1,58 @@
-# ADR 0005 — Templates imutáveis de rota
+# ADR 0005 — Templates de rota como blueprint clonado
 
 ## Status
 
-Aceita.
+**Parcialmente substituída** pela [ADR 0006](0006-rota-por-paradas.md), de julho
+de 2026.
+
+A decisão de separar *template* de *instância*, registrada aqui, continua
+válida e em vigor. O que mudou foi a **unidade** que o template descreve: deixou
+de ser uma lista de ruas e passou a ser uma sequência de paradas, cada uma com
+seus próprios clientes. Leia esta ADR pelo princípio; leia a 0006 para o modelo
+atual.
 
 ## Contexto
 
-Uma rota diária é uma sequência ordenada de ruas que o vendedor vai visitar
-no dia. Na maior parte dos dias o vendedor repete a mesma rota (ex.: segunda
-é sempre o bairro A, terça é sempre o bairro B). Mas dentro dessa rota do
-dia, o vendedor precisa de estado *efêmero*:
+O vendedor repete a mesma rota na maior parte dos dias. Ao mesmo tempo, a rota
+executada em um dia específico acumula estado efêmero que não pertence a um
+molde reutilizável: status de progresso, horários de início e fim, e o vínculo
+das vendas e pagamentos feitos naquela passagem.
 
-- Status por rua (`PENDING`, `IN_PROGRESS`, `COMPLETED`).
-- Timestamps de início e fim da visita.
-- Vendas e pagamentos vinculados à instância daquela rua naquele dia.
-
-Ao mesmo tempo, o gerente quer configurar "rotas-padrão" de forma reutilizável
-e sem se preocupar em poluir histórico.
-
-A tentação inicial é ter uma única tabela `routes` com um flag `is_template`.
-Isso falha porque o template acumula estado (`started_at`, `completed_at`)
-que não faz sentido ter em um template, e porque editar o template depois
-de já ter sido usado em rotas passadas pode corromper o histórico.
+A tentação inicial é uma única tabela com um sinalizador `é_template`. Isso
+falha por dois motivos: o template passa a carregar campos de execução que não
+significam nada nele, e editar o template depois de usado corromperia o
+histórico das rotas que derivaram dele.
 
 ## Decisão
 
-**Duas entidades separadas:**
+**Duas entidades separadas.**
 
-- **`route_templates` + `route_template_streets`** — blueprint reutilizável.
-  Contém `name`, `description` e a sequência de ruas com `visit_order`. **Não
-  tem estado de execução.** É tratado como *imutável* — alterar um template
-  não altera rotas passadas que derivaram dele.
-- **`routes` + `route_streets`** — instância do dia. Criada a partir da
-  duplicação de um template (copia nome e ruas ordenadas) e ganha vida
-  própria a partir daí. Status da rota, status por rua, timestamps e
-  vínculos com vendas/pagamentos vivem aqui.
+- **Template** — blueprint reutilizável. Contém nome, descrição e a sequência
+  planejada. **Não possui estado de execução.** É tratado como imutável do ponto
+  de vista das rotas já criadas.
+- **Rota** — instância de um dia. Criada por **clonagem** do template, ganhando
+  vida própria a partir daí. Status, horários e vínculos com vendas e pagamentos
+  vivem aqui.
 
-O fluxo do vendedor: escolhe um template → o backend duplica para uma nova
-`route` daquele dia → a partir daí ele trabalha sobre `route_streets`.
+O ponto central é que a rota **copia** o template em vez de referenciá-lo.
+Reorganizar o molde para amanhã não reescreve o que aconteceu ontem.
 
 ## Consequências
 
-**Positivas:**
+**Positivas**
 
-- Editar o template para o próximo dia não afeta rotas passadas nem a rota
-  em andamento. *Imutabilidade de referência*.
-- Dados do dia ficam limpos — sem lixo de template (`started_at=NULL`,
-  `completed_at=NULL`) poluindo listagens.
-- A relação `sales.route_street_id` é inequívoca: aponta para uma rua
-  específica em um dia específico, com seu `status` e `visit_order` do dia.
+- Editar o template não afeta rotas passadas nem a rota em andamento —
+  imutabilidade de referência.
+- Os dados do dia ficam limpos, sem campos de execução vazios poluindo
+  listagens de template.
+- O vínculo de uma venda com a parada é inequívoco: aponta para um lugar
+  específico em um dia específico.
 
-**Negativas:**
+**Negativas**
 
-- Duplicação de dados: cada rota do dia copia as ruas do template. Em
-  volumes baixos (uma rota por dia, ~5 ruas cada) é desprezível; em escala
-  maior seria possível repensar.
-- Mais uma tabela para quem está entendendo o domínio. O trade-off é que a
-  semântica fica explícita (template vs. instância) em vez de implícita num
-  flag.
-- Se o gerente quiser uma "biblioteca de templates com versionamento"
-  (e.g., "qual era o template tal em 2024?"), o modelo atual não cobre. Não
-  foi priorizado porque o uso real só edita templates raramente.
+- Duplicação de dados: cada rota copia a estrutura do template. Nos volumes
+  reais da operação é desprezível.
+- Uma entidade a mais para quem estuda o domínio. O ganho é semântica explícita
+  — molde e instância — em vez de um sinalizador implícito.
+- Não há versionamento histórico de templates. Não foi priorizado: na operação
+  real, templates mudam raramente.

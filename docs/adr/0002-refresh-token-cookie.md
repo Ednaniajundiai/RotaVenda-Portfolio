@@ -6,13 +6,16 @@ Aceita.
 
 ## Contexto
 
-O frontend precisa manter o usuário logado por semanas sem exigir login a
-cada 30 minutos — o vendedor usa o celular em campo o dia inteiro. A
-abordagem padrão é um par access + refresh token:
+O vendedor usa o tablet em campo o dia inteiro, frequentemente sob rede
+instável. Reautenticar no meio da rota — de pé, na porta de um cliente — é
+inaceitável do ponto de vista operacional. A abordagem padrão é um par de
+tokens:
 
-- **Access token:** JWT curto (30 min), enviado em `Authorization: Bearer`.
-- **Refresh token:** credencial longa (7 dias), trocada por um novo access
-  quando o atual expira.
+- **Token de acesso:** enviado em `Authorization: Bearer` a cada requisição.
+  Dimensionado para cobrir um turno de trabalho completo (~12 h), de modo que
+  a renovação nunca caia no meio do expediente.
+- **Token de renovação:** credencial longa (7 dias), trocada por um novo token
+  de acesso quando o atual expira — inclusive em segundo plano.
 
 O ponto sensível é *onde* guardar o refresh token no browser. As opções
 usualmente consideradas são:
@@ -24,26 +27,32 @@ usualmente consideradas são:
 | Cookie normal | Sim | Sim | Vulnerável a XSS + CSRF |
 | Cookie `httpOnly` | **Não** | Sim | CSRF |
 
-Um XSS refletido no frontend que conseguisse ler o refresh token do
-`localStorage` daria ao atacante 7 dias de sessão válida — bem pior que
-roubar um access de 30 min.
+Um XSS no frontend capaz de ler o token de renovação daria ao atacante 7 dias
+de sessão válida, **renováveis indefinidamente**. É materialmente pior que
+capturar um token de acesso, que expira sozinho e não se regenera.
 
 ## Decisão
 
 **Dois lugares, dois escopos:**
 
-- **Access token → `localStorage`.** Curto (30 min), reexpõe-se a toda hora,
-  risco baixo se vazado, e o JS precisa acessá-lo para montar o header
-  `Authorization` em cada request via Axios interceptor.
-- **Refresh token → cookie `httpOnly` + `Secure` + `SameSite=Lax`.**
+- **Token de acesso → armazenamento do navegador.** Expira sozinho, não se
+  regenera, e o JavaScript precisa lê-lo para montar o cabeçalho
+  `Authorization` a cada requisição. Vazá-lo dá ao atacante uma janela
+  limitada e que se fecha por conta própria.
+- **Token de renovação → cookie `httpOnly` + `Secure` + `SameSite=Lax`.**
   Enviado automaticamente só para o endpoint `/auth/refresh` (via
   `path=/api/v1/auth/refresh` restrito). JavaScript do browser não consegue
   ler. `SameSite=Lax` mitiga CSRF em requisições *cross-site*.
 
-A implementação vive em [`core/security.py`](../../backend/app/core/security.py)
-e [`api/v1/auth.py`](../../backend/app/api/v1/auth.py) no backend; no
-frontend, [`lib/api.ts`](../../frontend/src/lib/api.ts) faz o refresh
-automático no interceptor 401.
+No frontend, a renovação é automática: um interceptor detecta a resposta de não
+autenticado, troca o token e reenvia a requisição original — de forma
+transparente para quem está usando o sistema.
+
+**A autorização efetiva nunca depende do cliente.** O papel do usuário é
+resolvido no servidor a cada requisição. O frontend guarda o papel em um cookie
+separado e não sensível, usado apenas para decidir o que renderizar e evitar
+exibir uma tela que o usuário não poderia acessar — jamais como base de decisão
+de acesso.
 
 ## Consequências
 
@@ -55,12 +64,13 @@ automático no interceptor 401.
 
 **Negativas:**
 
-- Precisamos de `credentials: "include"` no fetch do `/auth/refresh` e
-  `ALLOWED_ORIGINS` corretamente configurado em produção (CORS +
-  `allow_credentials=True`).
-- Em ambiente de desenvolvimento com `http://localhost`, o flag `Secure` é
-  desabilitado, o que é aceitável porque o risco é local; em produção o
-  flag é obrigatório (validação em `config.py` força `ENVIRONMENT=production`
-  a ter HTTPS).
+- Exige envio explícito de credenciais na chamada de renovação e origens
+  permitidas corretamente configuradas em produção.
+- Em desenvolvimento sobre `http://localhost` o sinalizador `Secure` é
+  desligado — aceitável porque o risco é local. Em produção ele é obrigatório,
+  e a configuração falha na inicialização se o ambiente estiver marcado como
+  produtivo sem HTTPS. A validação acontece na carga das configurações, não em
+  tempo de requisição: erro de configuração deve impedir o processo de subir,
+  não vazar silenciosamente para o usuário.
 - Um CSRF ainda é teoricamente possível no endpoint de refresh; mitigamos
   com `SameSite=Lax`, que cobre todos os navegadores modernos.

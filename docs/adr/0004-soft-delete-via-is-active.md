@@ -58,8 +58,8 @@ Aplicável a: `User`, `Client`, `Street`, `Product`, `Route`,
 - Toda query precisa lembrar do filtro. Esquecer disso é o bug clássico
   desse padrão. Mitigamos com convenção consistente nos services e com
   testes que criam entidades, fazem *soft delete* e checam que somem das
-  listagens (`TestSoftDeleteSale` em
-  [`test_sale_service.py`](../../backend/tests/test_sale_service.py)).
+  listagens — criam a entidade, aplicam a exclusão lógica e verificam que ela some das
+  listagens e retorna "não encontrado" no acesso direto.
 - Tabela cresce indefinidamente. No uso atual não é problema (volumes
   baixos), mas se crescer, há o plano de arquivar registros inativos >1 ano
   em tabela separada.

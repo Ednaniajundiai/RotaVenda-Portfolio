@@ -23,15 +23,14 @@ edição de venda. Precisam de casa adequada.
 
 ## Decisão
 
-**Os routers em [`app/api/v1/`](../../backend/app/api/v1/) contêm apenas:**
+**Os routers contêm apenas:**
 
 1. Validação de input via schema Pydantic (injeção do FastAPI).
 2. Extração de dependências (`get_db`, `get_current_user`, `require_gerente`).
 3. Chamada a um único método de service.
 4. Retorno do `response_model`.
 
-**Os services em [`app/services/`](../../backend/app/services/) contêm
-toda a lógica de negócio:**
+**Os services contêm toda a lógica de negócio:**
 
 1. Orquestração de consultas ao ORM.
 2. Validações de invariantes (soma das parcelas, conflitos de status, regras

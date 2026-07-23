@@ -2,59 +2,82 @@
 
 ## Status
 
-Aceita.
+Aceita. Revisada em julho de 2026 — a fórmula foi corrigida e unificada.
 
 ## Contexto
 
-O RotaVenda é um sistema de **fiado**: cada cliente pode ter dezenas de
-vendas em aberto e dezenas de pagamentos aplicados em ordem FIFO. O saldo
-devedor (`saldo = vendas fiado − pagamentos + opening_balance`) aparece em
-quase todas as telas: listagem de clientes, extrato do cliente, tela do
-vendedor na rota, cabeçalho da nova venda.
+O RotaVenda administra crédito a prazo: um cliente acumula dezenas de vendas em
+aberto e dezenas de pagamentos aplicados em ordem FIFO. O saldo aparece em quase
+todas as telas — listagem de clientes, extrato, tela do vendedor na rota,
+cabeçalho da nova venda.
 
-A escolha óbvia seria materializar `clients.saldo` e atualizar por trigger ou
-por código da aplicação a cada venda/pagamento. Foi exatamente assim que o
-sistema começou, e duas situações causaram divergência entre o saldo
-materializado e a soma real de `sales − payments`:
+A escolha óbvia seria materializar uma coluna `saldo` e atualizá-la a cada venda
+e pagamento. Foi assim que o sistema começou, e duas situações produziram
+divergência entre o valor armazenado e a realidade:
 
-1. *Soft-delete* de uma venda fiado quitada parcialmente deixou o saldo
-   desatualizado porque o código de *undelete* não existia ainda.
-2. Uma edição de parcela (mudança de `due_date`) acabou disparando
-   recálculo parcial que subtraiu o valor duas vezes.
+1. A exclusão lógica de uma venda parcialmente quitada deixou o saldo
+   desatualizado, porque o caminho de reversão ainda não existia.
+2. Uma edição de vencimento de parcela disparou recálculo parcial que subtraiu
+   o valor duas vezes.
 
-Ambos os bugs teriam sido impossíveis se o saldo fosse derivado em cada leitura.
+Ambos seriam impossíveis se o saldo fosse derivado a cada leitura. O agravante:
+nenhum dos dois emitiu erro. O número simplesmente ficou errado, e só seria
+descoberto por alguém conferindo à mão — que é precisamente o trabalho que o
+sistema veio eliminar.
 
 ## Decisão
 
-**O saldo nunca é armazenado.** A coluna `clients.saldo` não existe. Sempre
-que um endpoint precisa do saldo, [`client_service.py`](../../backend/app/services/client_service.py)
-executa uma query agregada:
+**O saldo nunca é armazenado.** Não existe coluna `saldo` na tabela de clientes.
+Toda leitura deriva o valor:
 
-```sql
-saldo =  COALESCE(SUM(sale_installments.amount) filtered by ativa, 0)
-       - COALESCE(SUM(sale_installments.paid_amount), 0)
-       + clients.opening_balance
+```
+saldo_líquido = débito − crédito
+
+débito  = Σ (parcela.valor − parcela.valor_pago)
+          sobre parcelas de vendas a prazo ativas
+
+crédito = Σ pagamentos ativos − Σ alocações em parcelas
+          (o excedente que ainda não abateu dívida)
 ```
 
-O `opening_balance` cobre dívida pré-existente quando o cliente foi
-importado do caderno físico — essa é a única parcela de dívida materializada.
+Saldo negativo significa crédito a favor do cliente.
+
+A fórmula tem **uma única implementação canônica**, em um serviço dedicado de
+saldo, com duas entradas: uma para um cliente e uma variante em lote para
+listagens. Todos os demais serviços delegam a ela — nenhum reimplementa a
+agregação.
 
 ## Consequências
 
-**Positivas:**
+**Positivas**
 
-- Elimina uma classe inteira de bugs de sincronização.
-- Código de venda, pagamento e soft-delete fica mais simples — não precisa
-  "lembrar" de atualizar o saldo.
-- O saldo está sempre certo, mesmo depois de operações manuais no banco
-  (e.g., correção de importação via SQL).
+- Elimina uma classe inteira de defeitos de sincronização.
+- Os caminhos de venda, pagamento, estorno e exclusão ficam mais simples: não
+  precisam "lembrar" de atualizar nada.
+- O saldo permanece correto mesmo após intervenção manual no banco — o que
+  importou durante a migração do acervo em papel, quando correções via SQL foram
+  necessárias.
 
-**Negativas:**
+**Negativas**
 
-- Custo de leitura maior — cada listagem de cliente roda agregação.
-  Mitigamos com índice em `sale_installments(sale_id)` e filtrando
-  `sales.is_active = True` para descartar soft-deletes cedo. Em produção com
-  ~500 clientes ativos, a listagem responde em <100 ms.
-- Se a base crescer para dezenas de milhares de clientes, pode ser
-  necessário cache (Redis) ou *materialized view* atualizada em lote — mas
-  isso vira uma camada **acima** do dado fonte, nunca substitui ele.
+- Cada leitura paga uma agregação. Mitigado com o cálculo em lote nas listagens
+  e com descarte antecipado de registros inativos.
+- Se a base crescer em uma ordem de grandeza, será necessário cache ou visão
+  materializada. Isso viria como camada **acima** do dado fonte, jamais em
+  substituição a ele.
+
+## Nota de revisão
+
+A primeira versão desta ADR registrava a fórmula como
+`vendas a prazo − pagamentos + saldo_inicial`, apoiada em uma coluna de saldo
+inicial na tabela de clientes. Estava incorreta em dois pontos:
+
+1. **Omitia o crédito não alocado.** Pagamento que excede a dívida gera sobra, e
+   ignorá-la fazia o saldo de clientes com crédito aparecer inflado.
+2. **A coluna de saldo inicial foi removida.** Saldo herdado do caderno passou a
+   ser representado como uma venda a prazo comum, com um produto interno próprio
+   — o que o submete às mesmas regras de parcelamento, baixa e estorno de
+   qualquer outra dívida, em vez de ser um caso especial.
+
+A correção também eliminou uma duplicação real: a fórmula estava reimplementada
+em quatro pontos do código, e a divergência entre eles era questão de tempo.
