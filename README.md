@@ -62,10 +62,10 @@ LLM multimodal para transcrever as fotos e construí a esteira de conferência e
 
 Mais de 200 folhas passaram pela esteira. Case: [ednan.page/cases/rota-migracao](https://ednan.page/cases/rota-migracao/)
 
-**Assistente de consulta (implementado e avaliado, ainda não em produção).** Assistente somente
-leitura com LangGraph e tool calling, que reusa os services de relatório. Uma guarda descarta a
-resposta se ela citar valor em R$ ou percentual que não veio das consultas, e há teto de custo por
-usuário e por mês. Está numa branch, desligado por padrão.
+**Assistente de consulta.** O gerente pergunta com as próprias palavras e recebe rankings, séries
+e listas com os mesmos números das telas. O assistente só lê: usa LangGraph e tool calling sobre os
+mesmos services dos relatórios, então o número é o da tela. Uma guarda descarta a resposta se ela
+citar valor em R$ ou percentual que não veio das consultas, e há teto de custo por usuário e por mês.
 
 ## Stack
 
